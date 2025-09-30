@@ -45,16 +45,36 @@ while true; do
     ifconfig "$IF" "$TARGET_IP" netmask "$NETMASK" 2>/dev/null && \
       log "Set $IF -> $TARGET_IP/$NETMASK"
 
-    # Kill any existing dnsmasq started by this script
-    pkill -f "dnsmasq --interface=$IF" 2>/dev/null
-
-    # Start dnsmasq on that interface (if dnsmasq binary present)
+    # Try different DHCP methods in order of preference
+    
+    # Method 1: Try dnsmasq first (if available)
     if command -v dnsmasq >/dev/null 2>&1; then
+      pkill -f "dnsmasq --interface=$IF" 2>/dev/null
       dnsmasq --interface="$IF" --bind-interfaces --dhcp-range=${DHCP_RANGE_START},${DHCP_RANGE_END},12h --no-hosts --keep-in-foreground >/dev/null 2>&1 &
       sleep 1
       log "Started dnsmasq on $IF (dhcp ${DHCP_RANGE_START}-${DHCP_RANGE_END})"
+    
+    # Method 2: Try BusyBox udhcpd
+    elif command -v busybox >/dev/null 2>&1 && busybox --help | grep -q udhcpd; then
+      # Create simple udhcpd config
+      UDHCPD_CONF="/data/local/tmp/udhcpd-$IF.conf"
+      cat > "$UDHCPD_CONF" << EOF
+start $DHCP_RANGE_START
+end $DHCP_RANGE_END
+interface $IF
+option router $TARGET_IP
+option dns 8.8.8.8 8.8.4.4
+lease_file /data/local/tmp/udhcpd-$IF.leases
+EOF
+      pkill -f "udhcpd.*$IF" 2>/dev/null
+      busybox udhcpd -f "$UDHCPD_CONF" >/dev/null 2>&1 &
+      log "Started BusyBox udhcpd on $IF (dhcp ${DHCP_RANGE_START}-${DHCP_RANGE_END})"
+    
+    # Method 3: Fall back to system DHCP
     else
-      log "dnsmasq not found: clients may not receive DHCP from this module. Install dnsmasq (e.g. via Termux)."
+      log "No external DHCP daemon found, relying on system DHCP for $IF"
+      # Force routing table to ensure our IP is used as gateway
+      ip route add 192.168.1.0/24 dev "$IF" 2>/dev/null || true
     fi
   done
 
